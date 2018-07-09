@@ -142,6 +142,12 @@ extern "C" int gpu_ctc(lua_State* L) {
 
     float* costs = new float[minibatch_size];
 
+    size_t maxNumLabels = 0;
+    for (int bIdx = 0; bIdx < minibatch_size; bIdx++)
+      if (label_sizes_ptr[bIdx] > maxNumLabels)
+        maxNumLabels = label_sizes_ptr[bIdx];
+    int* alignments = new int[(maxNumLabels * 2 + 1) * minibatch_size];
+
     ctcOptions options;
     memset(&options, 0, sizeof(options));
     options.loc = CTC_GPU;
@@ -159,7 +165,7 @@ extern "C" int gpu_ctc(lua_State* L) {
                      labels_ptr, label_sizes_ptr,
                      sizes, (int) probs->size[1],
                      minibatch_size, costs,
-                     gpu_workspace, options);
+                     gpu_workspace, options, alignments);
 
     lua_newtable(L);
 
@@ -168,14 +174,25 @@ extern "C" int gpu_ctc(lua_State* L) {
         lua_rawseti(L, -2, ix+1);
     }
 
+    lua_createtable(L, minibatch_size, 0);
+    for (int bIdx = 0; bIdx < minibatch_size; bIdx++) {
+      lua_createtable(L, label_sizes_ptr[bIdx] * 2 + 1, 0);
+      for (int lIdx = 0; lIdx < label_sizes_ptr[bIdx] * 2 + 1; lIdx++) {
+        lua_pushnumber(L, alignments[(maxNumLabels * 2 + 1) * bIdx + lIdx]);
+        lua_rawseti(L, -2, lIdx+1);
+      }
+      lua_rawseti(L, -2, bIdx+1);
+    }
+
     THCudaFree(cutorch_getstate(L), (void *) gpu_workspace);
 
-    delete sizes;
-    delete labels_ptr;
-    delete label_sizes_ptr;
-    delete costs;
+    delete[] sizes;
+    delete[] labels_ptr;
+    delete[] label_sizes_ptr;
+    delete[] costs;
+    delete[] alignments;
 #endif
-    return 1;
+    return 2;
 }
 
 extern "C" int cpu_ctc(lua_State* L) {
@@ -209,6 +226,12 @@ extern "C" int cpu_ctc(lua_State* L) {
 
     float* costs = new float[minibatch_size];
 
+    size_t maxNumLabels = 0;
+    for (int bIdx = 0; bIdx < minibatch_size; bIdx++)
+      if (label_sizes_ptr[bIdx] > maxNumLabels)
+        maxNumLabels = label_sizes_ptr[bIdx];
+    int* alignments = new int[(maxNumLabels * 2 + 1) * minibatch_size];
+
     ctcOptions options;
     memset(&options, 0, sizeof(options));
     options.loc = CTC_CPU;
@@ -230,7 +253,7 @@ extern "C" int cpu_ctc(lua_State* L) {
                      labels_ptr, label_sizes_ptr,
                      sizes, probs->size[1],
                      minibatch_size, costs,
-                     cpu_workspace, options);
+                     cpu_workspace, options, alignments);
 
     lua_newtable(L);
 
@@ -239,13 +262,24 @@ extern "C" int cpu_ctc(lua_State* L) {
         lua_rawseti(L, -2, ix+1);
     }
 
-    delete cpu_workspace;
-    delete sizes;
-    delete labels_ptr;
-    delete label_sizes_ptr;
-    delete costs;
+    lua_createtable(L, minibatch_size, 0);
+    for (int bIdx = 0; bIdx < minibatch_size; bIdx++) {
+      lua_createtable(L, label_sizes_ptr[bIdx] * 2 + 1, 0);
+      for (int lIdx = 0; lIdx < label_sizes_ptr[bIdx] * 2 + 1; lIdx++) {
+        lua_pushnumber(L, alignments[(maxNumLabels * 2 + 1) * bIdx + lIdx]);
+        lua_rawseti(L, -2, lIdx+1);
+      }
+      lua_rawseti(L, -2, bIdx+1);
+    }
 
-    return 1;
+    delete[] cpu_workspace;
+    delete[] sizes;
+    delete[] labels_ptr;
+    delete[] label_sizes_ptr;
+    delete[] costs;
+    delete[] alignments;
+
+    return 2;
 }
 
 extern "C" int luaopen_libwarp_ctc(lua_State *L) {

@@ -91,7 +91,8 @@ void compute_alpha_kernel (const ProbT* probs, const int *label_sizes,
                            const int *labels_without_blanks, const int *label_offsets, 
                            int *labels_with_blanks, ProbT *alphas, 
                            ProbT* nll_forward, int stride, int out_dim,
-                           int S_memoffset, int T_memoffset, int blank_label) {
+                           int S_memoffset, int T_memoffset, int blank_label,
+                           int* alignments_) {
 
     ctc_helper::log_plus<ProbT> log_plus_f;
 
@@ -101,6 +102,7 @@ void compute_alpha_kernel (const ProbT* probs, const int *label_sizes,
     const int S = 2*L + 1;
     const int prob_offset = out_dim * blockIdx.x;
     const int repeats = repeats_in_labels[blockIdx.x];
+    int* alignments = (alignments_ != nullptr) ? alignments_ + blockIdx.x * S_memoffset : nullptr;
 
     const int NV = NT * VT;
     __shared__ int label[NV];
@@ -209,6 +211,58 @@ void compute_alpha_kernel (const ProbT* probs, const int *label_sizes,
             loglike = log_plus_f(loglike, alpha[i + (T - 1) * S]);
 
         nll_forward[blockIdx.x] = -loglike;
+
+
+        if(alignments)
+        {
+          /* fill alignments array
+           *   alignment array has the length |S|, or 2 * |L| + 1,
+           *      including all blanks at the beginning, end and in-between all labels.
+           *   the alignment array stores the end position in T.
+           *   Begin position is 0 if s=0 or acquired from s-1 alignments position.
+           */
+
+          // 0. error checking and initialize
+          for (size_t s = 0; s < S; s++){
+            alignments[s] = 0;
+          }
+
+          // 1. Find the max prob at time T
+          size_t curS = S-1;
+          for (int s = S - 2; s >= 0 && alpha[(T - 1) * S + s] != ctc_helper::neg_inf<ProbT>(); s--)
+            if (alpha[(T - 1) * S + s] > alpha[(T - 1) * S + curS])
+              curS = s;
+
+          alignments[curS]++;
+
+          // 2. backtrack: recursive
+          for(int curT = T-2; curT >= 0; curT--)
+          {
+            bool isBlankState = curS % 2 == 0;
+            if(isBlankState)
+            {
+              //choose max(curS,curS-1)
+              if (curS >= 1 && alpha[curT*S+curS-1] >= alpha[curT*S+curS])
+                curS--;
+            }
+            else
+            {
+              //choose max(curS,curS-1,curS-2)
+              if (curS >= 2 &&//
+                  alpha[curT * S + curS - 2] >= alpha[curT * S + curS] &&//
+                  alpha[curT * S + curS - 2] >= alpha[curT * S + curS - 1])
+                curS = curS -2;
+              else if (curS >= 1 && alpha[curT * S + curS - 1] >= alpha[curT * S + curS] &&//
+                  (2 > curS || alphas[curT * S + curS - 1] >= alpha[curT * S + curS - 2]))
+                curS--;
+            }
+            alignments[curS]++;
+          }
+
+          //duration -> alignment
+          for (size_t s = 1; s < S; s++)
+            alignments[s] += alignments[s-1];
+       }
     }
 }
 

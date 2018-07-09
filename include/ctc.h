@@ -100,7 +100,8 @@ ctcStatus_t compute_ctc_loss(const float* const activations,
                              int minibatch,
                              float *costs,
                              void *workspace,
-                             ctcOptions options);
+                             ctcOptions options,
+                             int* alignments = nullptr);
 
 
 /** For a given set of labels and minibatch size return the required workspace

@@ -45,7 +45,8 @@ ctcStatus_t compute_ctc_loss(const float* const activations,
                              int minibatch,
                              float *costs,
                              void *workspace,
-                             ctcOptions options) {
+                             ctcOptions options,
+                             int* alignments) {
 
     if (activations == nullptr ||
         flat_labels == nullptr ||
@@ -65,10 +66,12 @@ ctcStatus_t compute_ctc_loss(const float* const activations,
             return ctc.cost_and_grad(activations, gradients,
                                      costs,
                                      flat_labels, label_lengths,
-                                     input_lengths);
+                                     input_lengths,
+                                     alignments);
         else
             return ctc.score_forward(activations, costs, flat_labels,
-                                     label_lengths, input_lengths);
+                                     label_lengths, input_lengths,
+                                     alignments);
     } else if (options.loc == CTC_GPU) {
 #ifdef __CUDACC__
         GpuCTC<float> ctc(alphabet_size, minibatch, workspace, options.stream,
@@ -77,10 +80,12 @@ ctcStatus_t compute_ctc_loss(const float* const activations,
         if (gradients != NULL)
             return ctc.cost_and_grad(activations, gradients, costs,
                                      flat_labels, label_lengths,
-                                     input_lengths);
+                                     input_lengths,
+                                     alignments);
         else
             return ctc.score_forward(activations, costs, flat_labels,
-                                     label_lengths, input_lengths);
+                                     label_lengths, input_lengths,
+                                     alignments);
 #else
         std::cerr << "GPU execution requested, but not compiled with GPU support" << std::endl;
         return CTC_STATUS_EXECUTION_FAILED;
@@ -144,6 +149,8 @@ ctcStatus_t get_workspace_size(const int* const label_lengths,
         //probs (since we will pass in activations)
         *size_bytes += sizeof(float) * alphabet_size * maxT * minibatch;
 
+        //alignments
+        *size_bytes += sizeof(int) * S * minibatch;
     } else {
         //cpu can eventually replace all minibatch with
         //max number of concurrent threads if memory is

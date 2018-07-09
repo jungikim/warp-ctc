@@ -40,14 +40,16 @@ public:
                               ProbT* costs,
                               const int* const flat_labels,
                               const int* const label_lengths,
-                              const int* const input_lengths);
+                              const int* const input_lengths,
+                              int* alignments);
 
 
     ctcStatus_t score_forward(const ProbT* const activations,
                               ProbT* costs,
                               const int* const flat_labels,
                               const int* const label_lengths,
-                              const int* const input_lengths);
+                              const int* const input_lengths,
+                              int* alignments);
 
 private:
 
@@ -82,13 +84,14 @@ private:
     std::tuple<ProbT, bool>
             cost_and_grad_kernel(ProbT *grad, const ProbT* const probs,
                                  const int* const labels, int T, int L,
-                                 int mb, size_t bytes_used);
+                                 int mb, size_t bytes_used,
+                                 int* alignments);
 
     ProbT compute_alphas(const ProbT* probs, int repeats, int S, int T,
                          const int* const e_inc,
                          const int* const s_inc,
                          const int* const labels,
-                         ProbT* alphas);
+                         ProbT* alphas, int* alignments);
 
     ProbT compute_betas_and_grad(ProbT* grad, const ProbT* const probs,
                                  ProbT log_partition, int repeats,
@@ -188,7 +191,7 @@ template<typename ProbT>
 std::tuple<ProbT, bool>
 CpuCTC<ProbT>::cost_and_grad_kernel(ProbT *grad, const ProbT* const probs,
                                     const int* const labels,
-                                    int T, int L, int mb, size_t bytes_used) {
+                                    int T, int L, int mb, size_t bytes_used, int* alignments) {
 
     const int S = 2*L + 1; // Number of labels with blanks
 
@@ -202,7 +205,7 @@ CpuCTC<ProbT>::cost_and_grad_kernel(ProbT *grad, const ProbT* const probs,
 
     ProbT llForward = compute_alphas(probs, ctcm.repeats, S, T, ctcm.e_inc,
                                      ctcm.s_inc, ctcm.labels_w_blanks,
-                                     ctcm.alphas);
+                                     ctcm.alphas, alignments);
 
     ProbT llBackward = compute_betas_and_grad(grad, probs, llForward, ctcm.repeats,
                                               S, T, ctcm.e_inc, ctcm.s_inc,
@@ -225,7 +228,7 @@ ProbT CpuCTC<ProbT>::compute_alphas(const ProbT* probs, int repeats, int S, int 
                                     const int* const e_inc,
                                     const int* const s_inc,
                                     const int* const labels,
-                                    ProbT* alphas) {
+                                    ProbT* alphas, int* alignments) {
 
     int start =  (((S /2) + repeats - T) < 0) ? 0 : 1,
             end = S > 1 ? 2 : 1;
@@ -262,6 +265,50 @@ ProbT CpuCTC<ProbT>::compute_alphas(const ProbT* probs, int repeats, int S, int 
     ProbT loglike = ctc_helper::neg_inf<ProbT>();
     for(int i = start; i < end; ++i) {
         loglike = ctc_helper::log_plus<ProbT>()(loglike, alphas[i + (T - 1) * S]);
+    }
+
+    if(alignments) {
+      /* fill alignments array
+       *   alignment array has the length |S|, or 2 * |L| + 1,
+       *      including all blanks at the beginning, end and in-between all labels.
+       *   the alignment array stores the end position in T.
+       *   Begin position is 0 if s=0 or acquired from s-1 alignments position.
+       */
+
+      // 0. error checking and initialize
+      for (size_t s = 0; s < S; s++)
+        alignments[s] = 0;
+
+      // 1. Find the max prob at time T
+      size_t curS = S-1;
+      for (int s = S - 2; s >= 0 && alphas[(T - 1) * S + s] != ctc_helper::neg_inf<ProbT>(); s--)
+        if (alphas[(T - 1) * S + s] > alphas[(T - 1) * S + curS])
+          curS = s;
+
+      alignments[curS]++;
+
+      // 2. backtrack: recursive
+      for(int curT = T-2; curT >= 0; curT--) {
+        bool isBlankState = curS % 2 == 0;
+        if(isBlankState) { //choose max(curS,curS-1)
+          if (curS >= 1 && alphas[curT*S+curS-1] >= alphas[curT*S+curS])
+            curS--;
+        }
+        else { //choose max(curS,curS-1,curS-2)
+          if (curS >= 2 && //
+              alphas[curT * S + curS - 2] >= alphas[curT * S + curS] && //
+              alphas[curT * S + curS - 2] >= alphas[curT * S + curS - 1])
+            curS = curS -2;
+          else if (curS >= 1 && alphas[curT * S + curS - 1] >= alphas[curT * S + curS] && //
+                   (2 > curS || alphas[curT * S + curS - 1] >= alphas[curT * S + curS - 2]))
+            curS--;
+        }
+        alignments[curS]++;
+      }
+
+      //duration -> alignment
+      for (size_t s = 1; s < S; s++)
+        alignments[s] += alignments[s-1];
     }
 
     return loglike;
@@ -379,7 +426,8 @@ CpuCTC<ProbT>::cost_and_grad(const ProbT* const activations,
                              ProbT *costs,
                              const int* const flat_labels,
                              const int* const label_lengths,
-                             const int* const input_lengths) {
+                             const int* const input_lengths,
+                             int* alignments) {
     if (activations == nullptr ||
         grads == nullptr ||
         costs == nullptr ||
@@ -427,7 +475,8 @@ CpuCTC<ProbT>::cost_and_grad(const ProbT* const activations,
                                      probs + mb * alphabet_size_,
                                      flat_labels + std::accumulate(label_lengths, label_lengths + mb, 0),
                                      T, L, mb,
-                                     bytes_used + mb * per_minibatch_bytes);
+                                     bytes_used + mb * per_minibatch_bytes,
+                                     (alignments != nullptr) ? alignments + mb * maxS : nullptr);
     }
 
     return CTC_STATUS_SUCCESS;
@@ -438,7 +487,8 @@ ctcStatus_t CpuCTC<ProbT>::score_forward(const ProbT* const activations,
                                          ProbT* costs,
                                          const int* const flat_labels,
                                          const int* const label_lengths,
-                                         const int* const input_lengths) {
+                                         const int* const input_lengths,
+                                         int* alignments) {
     if (activations == nullptr ||
         costs == nullptr ||
         flat_labels == nullptr ||
@@ -489,7 +539,8 @@ ctcStatus_t CpuCTC<ProbT>::score_forward(const ProbT* const activations,
         else {
             costs[mb] = -compute_alphas(probs + mb * alphabet_size_, ctcm.repeats, S, T,
                                         ctcm.e_inc, ctcm.s_inc, ctcm.labels_w_blanks,
-                                        ctcm.alphas);
+                                        ctcm.alphas,
+                                        (alignments != nullptr) ? alignments + mb * maxS : nullptr);
         }
 
     }
